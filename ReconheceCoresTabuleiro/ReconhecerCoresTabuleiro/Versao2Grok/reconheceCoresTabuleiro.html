@@ -1,0 +1,227 @@
+<script type="text/javascript">
+        var gk_isXlsx = false;
+        var gk_xlsxFileLookup = {};
+        var gk_fileData = {};
+        function filledCell(cell) {
+          return cell !== '' && cell != null;
+        }
+        function loadFileData(filename) {
+        if (gk_isXlsx && gk_xlsxFileLookup[filename]) {
+            try {
+                var workbook = XLSX.read(gk_fileData[filename], { type: 'base64' });
+                var firstSheetName = workbook.SheetNames[0];
+                var worksheet = workbook.Sheets[firstSheetName];
+
+                // Convert sheet to JSON to filter blank rows
+                var jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, blankrows: false, defval: '' });
+                // Filter out blank rows (rows where all cells are empty, null, or undefined)
+                var filteredData = jsonData.filter(row => row.some(filledCell));
+
+                // Heuristic to find the header row by ignoring rows with fewer filled cells than the next row
+                var headerRowIndex = filteredData.findIndex((row, index) =>
+                  row.filter(filledCell).length >= filteredData[index + 1]?.filter(filledCell).length
+                );
+                // Fallback
+                if (headerRowIndex === -1 || headerRowIndex > 25) {
+                  headerRowIndex = 0;
+                }
+
+                // Convert filtered JSON back to CSV
+                var csv = XLSX.utils.aoa_to_sheet(filteredData.slice(headerRowIndex)); // Create a new sheet from filtered array of arrays
+                csv = XLSX.utils.sheet_to_csv(csv, { header: 1 });
+                return csv;
+            } catch (e) {
+                console.error(e);
+                return "";
+            }
+        }
+        return gk_fileData[filename] || "";
+        }
+        </script><!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Color Board Analyzer with Edge Detection</title>
+    <script src="https://cdn.jsdelivr.net/pyodide/v0.26.1/full/pyodide.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        #output { margin-top: 20px; }
+        img { max-width: 300px; margin: 10px; }
+        #downloadLink { display: none; margin-top: 20px; }
+    </style>
+</head>
+<body>
+    <h1>Color Board Analyzer with Edge Detection</h1>
+    <input type="file" id="imageInput" accept=".png">
+    <button onclick="processImage()">Analyze Image</button>
+    <div id="output"></div>
+    <a id="downloadLink" href="#" download="resultado.csv">Download Resultado</a>
+
+    <script>
+        let pyodide;
+
+        async function loadPyodideAndPackages() {
+            pyodide = await loadPyodide();
+            await pyodide.loadPackage(['numpy', 'opencv-python']);
+            await pyodide.runPythonAsync(`
+import numpy as np
+import cv2
+import js
+from js import document
+from pyodide.ffi import create_proxy
+import io
+import base64
+
+# Mapeamento de cores RGB para nomes
+color_map = {
+    (255, 0, 0): "Vermelho",
+    (0, 255, 0): "Green",
+    (0, 128, 0): "Verde",
+    (0, 0, 255): "Azul",
+    (255, 255, 0): "Amarelo",
+    (255, 165, 0): "Laranja",
+    (128, 0, 128): "Roxo",
+    (0, 255, 255): "Cyan",
+    (255, 0, 255): "Magenta",
+    (255, 255, 255): "White",
+    (0, 0, 0): "Black"
+}
+
+def find_closest_color(rgb):
+    """Encontra a cor mais próxima no mapa de cores"""
+    rgb = tuple(rgb)
+    if rgb in color_map:
+        return color_map[rgb]
+    min_dist = float('inf')
+    closest_color = "Unknown"
+    for color_rgb, name in color_map.items():
+        dist = sum((a - b) ** 2 for a, b in zip(rgb, color_rgb))
+        if dist < min_dist:
+            min_dist = dist
+            closest_color = name
+    return closest_color
+
+def detect_grid_lines(img_gray, kernel_h, kernel_v):
+    """Aplica convolução para detectar bordas horizontais e verticais"""
+    print("Debug: Aplicando convolução para detecção de bordas")
+    edges_h = cv2.filter2D(img_gray, -1, kernel_h)
+    edges_v = cv2.filter2D(img_gray, -1, kernel_v)
+    edges = cv2.addWeighted(np.abs(edges_h), 0.5, np.abs(edges_v), 0.5, 0)
+    _, edges = cv2.threshold(edges, 50, 255, cv2.THRESH_BINARY)
+    print("Debug: Bordas detectadas e binarizadas")
+    return edges
+
+def find_grid_lines(edges, axis=0):
+    """Conta linhas ou colunas na imagem de bordas"""
+    projection = np.sum(edges, axis=axis) // 255
+    threshold = np.mean(projection) * 1.5
+    lines = []
+    for i, val in enumerate(projection):
+        if val > threshold:
+            if not lines or i > lines[-1] + 10:
+                lines.append(i)
+    return lines
+
+def process_image(image_data):
+    """Processa a imagem e retorna a matriz de cores e imagens intermediárias"""
+    print("Debug: Iniciando processamento da imagem")
+    # Converter imagem de base64 para array numpy
+    nparr = np.frombuffer(base64.b64decode(image_data.split(',')[1]), np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    print(f"Debug: Imagem carregada, dimensões: {img.shape}")
+
+    # Converter para RGB e escala de cinza
+    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    img_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    # Aplicar filtro de suavização
+    kernel_smooth = np.ones((5, 5), np.float32) / 25
+    img_smoothed = cv2.filter2D(img_rgb, -1, kernel_smooth)
+    print("Debug: Filtro de suavização aplicado")
+
+    # Salvar imagem suavizada
+    _, buffer = cv2.imencode('.png', cv2.cvtColor(img_smoothed, cv2.COLOR_RGB2BGR))
+    img_smoothed_b64 = base64.b64encode(buffer).decode('utf-8')
+    document.getElementById("output").innerHTML += '<p>Imagem Suavizada:</p><img src="data:image/png;base64,' + img_smoothed_b64 + '">'
+
+    # Definir kernels de convolução para bordas
+    kernel_h = np.array([[-1, -1, -1], [2, 2, 2], [-1, -1, -1]], dtype=np.float32)
+    kernel_v = np.array([[-1, 2, -1], [-1, 2, -1], [-1, 2, -1]], dtype=np.float32)
+
+    # Detectar bordas
+    edges = detect_grid_lines(img_gray, kernel_h, kernel_v)
+
+    # Salvar imagem de bordas
+    _, buffer = cv2.imencode('.png', edges)
+    edges_b64 = base64.b64encode(buffer).decode('utf-8')
+    document.getElementById("output").innerHTML += '<p>Bordas do Tabuleiro:</p><img src="data:image/png;base64,' + edges_b64 + '">'
+
+    # Detectar linhas horizontais e verticais
+    h_lines = find_grid_lines(edges, axis=1)
+    v_lines = find_grid_lines(edges, axis=0)
+    print(f"Debug: Linhas horizontais detectadas: {len(h_lines)}, verticais: {len(v_lines)}")
+
+    # Determinar células do tabuleiro
+    rows = len(h_lines) - 1
+    cols = len(v_lines) - 1
+    if rows < 1 or cols < 1:
+        raise ValueError("Não foi possível detectar a grade do tabuleiro")
+    print(f"Debug: Grade detectada: {rows}x{cols}")
+
+    # Inicializar matriz de resultados
+    result_matrix = []
+    for i in range(rows):
+        row = []
+        for j in range(cols):
+            # Calcular centro da célula
+            y_start = (h_lines[i] + h_lines[i+1]) // 2
+            x_start = (v_lines[j] + v_lines[j+1]) // 2
+            # Obter cor no centro da célula
+            pixel = img_smoothed[y_start, x_start]
+            color_name = find_closest_color(pixel)
+            row.append(color_name)
+            print(f"Debug: Célula ({i},{j}) - Cor: {pixel}, Nome: {color_name}")
+        result_matrix.append(row)
+
+    # Gerar CSV
+    csv_content = "\\n".join([",".join(row) for row in result_matrix])
+    print("Debug: Matriz de cores gerada, salvando CSV")
+    return csv_content, img_smoothed_b64, edges_b64
+
+def main(image_data):
+    """Função principal para chamar o processamento"""
+    csv_content, img_smoothed_b64, edges_b64 = process_image(image_data)
+    return csv_content
+            `);
+        }
+
+        async function processImage() {
+            const fileInput = document.getElementById('imageInput');
+            if (!fileInput.files[0]) {
+                alert("Por favor, selecione uma imagem PNG.");
+                return;
+            }
+
+            const reader = new FileReader();
+            reader.onload = async function(e) {
+                const imageData = e.target.result;
+                document.getElementById("output").innerHTML = '<p>Imagem Original:</p><img src="' + imageData + '">';
+                try {
+                    const csvContent = await pyodide.runPythonAsync(`main('${imageData}')`);
+                    const blob = new Blob([csvContent], { type: 'text/csv' });
+                    const url = URL.createObjectURL(blob);
+                    const downloadLink = document.getElementById('downloadLink');
+                    downloadLink.href = url;
+                    downloadLink.style.display = 'block';
+                } catch (error) {
+                    document.getElementById("output").innerHTML += '<p>Erro: ' + error + '</p>';
+                }
+            };
+            reader.readAsDataURL(fileInput.files[0]);
+        }
+
+        loadPyodideAndPackages();
+    </script>
+</body>
+</html>
